@@ -1,34 +1,53 @@
 #!/usr/bin/env node
 // Builds docs/index.html: the app (index.html) AES-encrypted behind a password gate,
 // suitable for public static hosting (GitHub Pages).
-// Usage: node build.js <password>
+//
+// Usage: node build.js <editPassword> [plannerPassword]
+//   editPassword     unlocks the full editable planner
+//   plannerPassword  (optional) unlocks a locked, view-only version for the venue team
+//
+// If a plan.json (a "Save plan" download from the app) sits next to this script,
+// it is baked in as the default arrangement every fresh visitor sees.
 'use strict';
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const password = process.argv[2];
-if (!password) {
-  console.error('Usage: node build.js <password>');
+const [editPw, viewPw] = process.argv.slice(2);
+if (!editPw) {
+  console.error('Usage: node build.js <editPassword> [plannerPassword]');
   process.exit(1);
 }
 
 const ITERATIONS = 600000;
 const src = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
-const plaintext = '<!doctype html>\n<meta charset="utf-8">\n' + src;
 
-const salt = crypto.randomBytes(16);
-const iv = crypto.randomBytes(12);
-const key = crypto.pbkdf2Sync(password, salt, ITERATIONS, 32, 'sha256');
-const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-const ct = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final(), cipher.getAuthTag()]);
+let planScript = '';
+const planPath = path.join(__dirname, 'plan.json');
+if (fs.existsSync(planPath)) {
+  const plan = JSON.parse(fs.readFileSync(planPath, 'utf8')); // validate it parses
+  planScript = '<script>window.DEFAULT_PLAN=' + JSON.stringify(plan) + '</script>\n';
+  console.log('Baked in plan.json (saved ' + (plan.saved || 'unknown date') + ')');
+} else {
+  console.log('No plan.json found — building without a baked-in arrangement.');
+}
 
-const payload = JSON.stringify({
-  salt: salt.toString('base64'),
-  iv: iv.toString('base64'),
-  ct: ct.toString('base64'),
-  iter: ITERATIONS,
-});
+const head = '<!doctype html>\n<meta charset="utf-8">\n';
+const editPlain = head + planScript + src;
+const viewPlain = head + '<script>window.PLANNER_LOCKED=true</script>\n' + planScript + src;
+
+function encrypt(plaintext, password) {
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const key = crypto.pbkdf2Sync(password, salt, ITERATIONS, 32, 'sha256');
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final(), cipher.getAuthTag()]);
+  return { salt: salt.toString('base64'), iv: iv.toString('base64'), ct: ct.toString('base64'), iter: ITERATIONS };
+}
+
+const variants = [encrypt(editPlain, editPw)];
+if (viewPw) variants.push(encrypt(viewPlain, viewPw));
+const payload = JSON.stringify(variants);
 
 const gate = `<!doctype html>
 <html lang="en">
@@ -85,19 +104,25 @@ const gate = `<!doctype html>
 </form>
 <script>
 'use strict';
-const DATA = ${payload};
+const VARIANTS = ${payload};
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
-async function decrypt(pw){
+async function decryptOne(data, pw){
   const enc = new TextEncoder();
   const km = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey']);
   const key = await crypto.subtle.deriveKey(
-    {name:'PBKDF2', salt:b64(DATA.salt), iterations:DATA.iter, hash:'SHA-256'},
+    {name:'PBKDF2', salt:b64(data.salt), iterations:data.iter, hash:'SHA-256'},
     km, {name:'AES-GCM', length:256}, false, ['decrypt']);
-  const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv:b64(DATA.iv)}, key, b64(DATA.ct));
+  const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv:b64(data.iv)}, key, b64(data.ct));
   return new TextDecoder().decode(pt);
 }
+async function decrypt(pw){
+  for(const v of VARIANTS){
+    try{ return await decryptOne(v, pw); }catch(e){}
+  }
+  throw new Error('wrong password');
+}
 async function open(pw, remember){
-  const html = await decrypt(pw); // throws on wrong password
+  const html = await decrypt(pw);
   if(remember){ try{ localStorage.setItem('seating-gate', pw); }catch(e){} }
   document.open();
   document.write(html);
@@ -122,4 +147,5 @@ document.getElementById('f').addEventListener('submit', async e => {
 
 fs.mkdirSync(path.join(__dirname, 'docs'), { recursive: true });
 fs.writeFileSync(path.join(__dirname, 'docs', 'index.html'), gate);
-console.log('Built docs/index.html (' + Math.round(gate.length / 1024) + ' KB)');
+console.log('Built docs/index.html (' + Math.round(gate.length / 1024) + ' KB)' +
+  (viewPw ? ' — edit + planner passwords' : ' — edit password only'));
