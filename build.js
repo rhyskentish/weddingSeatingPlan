@@ -20,7 +20,17 @@ if (!editPw) {
 }
 
 const ITERATIONS = 600000;
+const SYNC_REPO = 'rhyskentish/weddingSeatingPlan';
 const src = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+
+// stable key for the published shared plan (docs/plan.enc.json); generated once, gitignored
+const keyPath = path.join(__dirname, 'app.key');
+if (!fs.existsSync(keyPath)) {
+  fs.writeFileSync(keyPath, crypto.randomBytes(32).toString('base64'));
+  console.log('Generated new app.key');
+}
+const appKey = fs.readFileSync(keyPath, 'utf8').trim();
+const syncScript = `<script>window.APP_KEY='${appKey}';window.SYNC_REPO='${SYNC_REPO}'</script>\n`;
 
 let planScript = '';
 const planPath = path.join(__dirname, 'plan.json');
@@ -33,8 +43,8 @@ if (fs.existsSync(planPath)) {
 }
 
 const head = '<!doctype html>\n<meta charset="utf-8">\n';
-const editPlain = head + planScript + src;
-const viewPlain = head + '<script>window.PLANNER_LOCKED=true</script>\n' + planScript + src;
+const editPlain = head + syncScript + planScript + src;
+const viewPlain = head + '<script>window.PLANNER_LOCKED=true</script>\n' + syncScript + planScript + src;
 
 function encrypt(plaintext, password) {
   const salt = crypto.randomBytes(16);

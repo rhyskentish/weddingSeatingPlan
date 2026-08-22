@@ -1,5 +1,6 @@
 # The unencrypted app contains the guest list — never commit it to this public repo.
 /index.html
 plan.json
+app.key
 .DS_Store
 node_modules/
